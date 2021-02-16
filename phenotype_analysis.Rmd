@@ -1,0 +1,1402 @@
+---
+title: "Projet EPIQUE : analyse des données de phénotypage chez la caille"
+author: "CERUTTI Chloé"
+date: "12/02/21"
+output:
+   html_document: 
+      toc: TRUE
+      toc_float: TRUE
+      code_folding: hide
+   pdf_document:
+      keep_tex: TRUE
+---
+
+**Objectif :** Evaluer si des modifications épigénétiques appliquées à des animaux sont transmises ou non au cours des générations et corrélées à des différences de performances phénotypiques.
+
+# Librairies:
+
+```{r}
+libraries = c("ggplot2", "plyr", "dplyr", "ggpmisc", "wrapr", "magrittr", "rlang",
+              "scales", "vctrs", "gridExtra", "cowplot", "MASS", "gginnards", "tidyr",
+              "broom", "chemCal", "viridis", "data.table", "cdata", "circlize", "GetoptLong",
+              "limma", "stringr", "devtools", "rtracklayer", "edgeR", "ComplexHeatmap")
+
+suppressWarnings(suppressMessages(invisible(lapply(libraries, library, character.only = TRUE))))
+```
+
+# I. Lecture des données :
+
+```{r}
+# Data table reading:
+phenotypes_data = "inputs/Pheno_all.txt"
+table = read.table(phenotypes_data, sep="\t", header=TRUE, na.strings="")
+
+# Change the order of treat levels to compare with Control:
+df=table
+df$batch = as.character(df$batch)
+df$treat <- factor(df$treat, levels = c("Control", "IC", "Bisphenol", "Genistein", "5Aza"))
+df$line <- factor(df$line, levels = c("S+", "DD", "A", "B"))
+
+# Addition of family link between individuals:
+df <- df %>% mutate(family = as.integer(factor(df$father)))
+
+# Addition of 6 growth phenotypes:
+## Addition of non-normalized weight differences:
+df$d8_d21 <- df$d21weight - df$d8weight
+df$d21_d36 <- df$d36weight - df$d21weight
+df$d36_d78 <- df$d78weight - df$d36weight
+df$d8_d36 <- df$d36weight - df$d8weight
+df$d8_d78 <- df$d78weight - df$d8weight
+df$d21_d78 <- df$d78weight - df$d21weight
+
+## Addition of 3 normalized weight differences:
+df$d8_d21_norm <- (df$d21weight - df$d8weight) / df$d8weight
+df$d21_d36_norm <- (df$d36weight - df$d21weight) / df$d21weight
+df$d36_d78_norm <- (df$d78weight - df$d36weight) / df$d36weight
+df$d8_d36_norm <- (df$d36weight - df$d8weight) / df$d8weight
+df$d8_d78_norm <- (df$d78weight - df$d8weight) / df$d8weight
+df$d21_d78_norm <- (df$d78weight - df$d21weight) / df$d21weight
+head(df)
+
+# Direct access to variables giving their names:
+suppressWarnings(suppressMessages(attach(df)))
+names(df)
+```
+
+```{r, fig.width=15, fig.height=7}
+# Data table reading: balance between batch 1 and batch 2:
+laid_data = "inputs/PonteInd.txt"
+table_batch = read.table(laid_data, sep="\t", header=TRUE)
+suppressWarnings(suppressMessages(attach(table_batch)))
+df_batch=table_batch
+df_batch$batch = as.character(df_batch$batch)
+df_batch$date = as.character(df_batch$date)
+df_batch$date = as.Date(df_batch$date, format = "%d/%m/%y")
+
+# Change the order of treat levels to compare with Control:
+df_batch$line <- factor(df_batch$line, levels = c("S+", "DD", "A", "B"))
+suppressWarnings(suppressMessages(attach(df_batch)))
+df_eq_batch = df_batch %>% group_by(id) %>%  mutate(nb_days = as.numeric(max(date) - min(date)), eggNumber = sum(count)) 
+df_gb_id = unique(df_eq_batch[, c("id", "batch", "nb_days", "eggNumber")])
+#nrow(df_gb_id) # 617
+head(df_gb_id)
+```
+
+```{r, fig.width=15, fig.height=7}
+# Distribution of day number and egg number according to the batch:
+hist <- function(dataframe, x.var) {
+  x.var = rlang::sym(x.var)
+  ggp <- ggplot(dataframe, aes(x= !! x.var, color=batch, fill=batch)) +
+    geom_histogram(alpha=0.5, position="identity") +
+    geom_density(alpha=.2) + theme(legend.title = element_blank())
+  return(ggp)
+}
+
+hist_eggnb = hist(dataframe = df_gb_id, x.var = "nb_days")
+hist_nb_days = hist(dataframe = df_gb_id, x.var = "eggNumber")
+
+suppressWarnings(suppressMessages(grid.arrange(hist_eggnb, hist_nb_days, ncol = 2, nrow = 1)))
+
+# Checking the balance between batch 1 and batch 2:
+m_nbegg_batch_1 = mean(df_gb_id[,4][df_gb_id[,2]=="1"]) # 18.71947
+m_nbegg_batch_2 = mean(df_gb_id[,4][df_gb_id[,2]=="2"]) # 20.35987
+#m_nbegg_batch_1 / m_nbegg_batch_2 # 0.9194297 : ratio close to 1 => number of eggs balanced between lot 1 and 2
+```
+
+```{r}
+# Replace the egg number:
+nb_f_old_df = length(which(df$batch=="1" & df$sex=="F")) # 447
+nb_f_new_df = nrow(df_gb_id) # 617
+diff_nb_f = nb_f_new_df - nb_f_old_df # 170
+suppressWarnings(suppressMessages(df$eggNumber <- replace(df$eggNumber, df$ID %in% df_gb_id$id, df_gb_id$eggNumber)))
+
+# Ratio batch 1 / btach 2 :
+mean_eggnb_batch1 = mean(df$eggNumber[which(df$batch == "1")],  na.rm = TRUE) # 19.71617
+mean_eggnb_batch2 = mean(df$eggNumber[which(df$batch == "2")],  na.rm = TRUE) # 19.36422
+ratio_batch1_2 = mean_eggnb_batch1 / mean_eggnb_batch2 # 1.018176 
+suppressWarnings(suppressMessages(attach(df)))
+
+# Distribution du nombre d'oeufs par lot :
+hist(dataframe = df, x.var = "eggNumber")
+```
+
+## Régression linéaire du poids en fonction de l'âge pour chaque lignée :
+
+```{r}
+# Table of age at first egg and egg number:
+df_egg = df[, -c(7:10)]
+
+# Removal of individuals with weight number < 3:
+df$nbNA <- rowSums(is.na(df[,c("d8weight", "d21weight", "d36weight", "d78weight")]))
+nb_ind_df_init = nrow(df) # 1979
+df_diff <- df %>%  filter(df$nbNA < 2) # nb na <2 => 1893
+nb_ind_df_final = nrow(df_diff)
+nb_lost_ind = nb_ind_df_init - nb_ind_df_final # 50 => 86
+head(df_diff)
+```
+
+### a. Données non normalisées : 
+
+```{r, fig.width=15, fig.height=7}
+df_weight = df_diff[,c("ID", "line", "sex", "treat", "d8weight", "d21weight", "d36weight", "d78weight")]
+df_long = pivot_longer(df_weight, cols=5:8, names_to = "age", values_to = "weight")
+df_long$age[df_long$age == c("d8weight", "d21weight", "d36weight", "d78weight")] <- c(8, 21, 36, 78)
+df_order = df_long[order(as.numeric(df_long$age)),]
+
+ggp <- function(dataframe, color) {
+ggplot(dataframe, aes(x=as.numeric(dataframe$age), y=weight, color=color, shape=color)) +
+  geom_point() + geom_smooth(method=lm, se=FALSE, fullrange=TRUE) + labs(x = "age") + 
+  # facet_wrap(~line, ncol = 4) +
+  stat_fit_glance(method = "lm",
+                  label.x = "right", label.y = "bottom", size=3.5,
+                  method.args = list(formula = y ~ x),
+                  mapping = aes(label = sprintf('r^2~"="~%.3f~~italic(P)~"="~%.2g',
+                                stat(r.squared), stat(p.value))), parse = TRUE)
+}
+
+ggp_line = ggp(dataframe = df_long, df_long$line)
+ggp_sex = ggp(dataframe = df_long, df_long$sex)
+ggp_treat = ggp(dataframe = df_long, df_long$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_line, ggp_sex, ggp_treat, ncol = 2, nrow = 2)))
+```
+
+```{r}
+# Table of r² for each individual:
+df_long$ID <- as.factor(as.character(df_long$ID))
+df_long$weigth <- as.numeric(df_long$weight)
+df_long$age <- as.numeric(df_long$age)
+rsq_values = lapply(levels(df_long$ID), function(x){sdf=df_long[which(df_long$ID==x),];if(nrow(sdf)>=2){c(x,summary(lm(weight~age,data=sdf))$r.squared)}else{NULL};})
+rsq_values=rsq_values[!sapply(rsq_values,is.null)]
+df_r = do.call(rbind.data.frame, rsq_values)
+colnames(df_r)<-c("ID","rsquarred")
+df_r$ID = as.character(df_r$ID)
+df_r$rsquarred = as.numeric(as.character(df_r$rsquarred))
+
+# Distribution of r²:
+hist <- function(dataframe, x.var) {
+  x.var = rlang::sym(x.var)
+  ggp <- ggplot(dataframe, aes(x= !! x.var)) +
+    geom_histogram(alpha=0.5, position="identity") +
+    theme(legend.title = element_blank())
+  return(ggp)
+}
+
+hist(dataframe = df_r, x.var = "rsquarred")
+
+# Slopes:
+slope_values = lapply(levels(df_long$ID), function(x){sdf=df_long[which(df_long$ID==x),];if(nrow(sdf)>=2){c(x,summary(lm(weight~age,data=sdf))$coefficient[2, 1])}else{NULL};})
+# summary(lm(weight~age,data=df))$coefficients[2, 1] # pente
+slope_values = slope_values[!sapply(slope_values,is.null)]
+df_slope = do.call(rbind.data.frame, slope_values)
+colnames(df_slope)<-c("ID","slope")
+df_slope$ID = as.character(df_slope$ID)
+df_slope$slope = as.numeric(as.character(df_slope$slope))
+```
+
+
+```{r, fig.width=15, fig.height=7}
+merged_table = merge(df_long, df_r, by.x="ID", by.y="ID")
+head(merged_table)
+suppressWarnings(suppressMessages(attach(merged_table)))
+
+df_r_min_max <- merged_table %>% group_by(line, sex, treat) %>% mutate(Maxrsquarred = max(rsquarred), Minrsquarred = min(rsquarred)) %>% ungroup() %>% 
+                filter(rsquarred %in% c(Maxrsquarred, Minrsquarred))
+head(df_r_min_max)
+
+min_r = min(merged_table$rsquarred)
+min_r_df <- merged_table[merged_table$rsquarred == min_r, ]
+min_r_df
+
+max_r = max(merged_table$rsquarred)
+max_r_df <- merged_table[merged_table$rsquarred == max_r, ]
+head(max_r_df)
+
+ggp <- function(dataframe, color, title) {
+  gg <- ggplot(dataframe, aes(x=as.numeric(dataframe$age), y=weight, color=color, shape=color)) +
+  geom_point() + geom_smooth(method=lm, se=FALSE, fullrange=TRUE) + labs(x = "age") + 
+  # facet_wrap(~df_r_min_max$line, ncol = 4) +
+  stat_fit_glance(method = "lm",
+                  label.x = "right", label.y = "bottom", size=3.5,
+                  method.args = list(formula = y ~ x),
+                  mapping = aes(label = sprintf('r^2~"="~%.3f~~italic(P)~"="~%.2g',
+                                stat(r.squared), stat(p.value))), parse = TRUE) 
+  ggp <- gg + ggtitle(title)
+} 
+
+ggp_min = ggp(dataframe = min_r_df, min_r_df$line, min_r_df$ID)
+ggp_max = ggp(dataframe = max_r_df[1:4,], max_r_df[1:4,]$line, max_r_df[1:4]$ID)
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_min, ggp_max, ncol = 2, nrow = 2)))
+```
+
+```{r, fig.width=15, fig.height=7}
+df_r_filter <- merged_table %>% filter(rsquarred < 0.75)
+df_r_filter = df_r_filter[order(df_r_filter$rsquarred),]
+df_r_0_4 <- df_r_filter %>% filter(df_r_filter$ID == 7090)
+df_r_0_5 <- df_r_filter %>% filter(df_r_filter$ID == 2118)
+df_r_0_7 <- df_r_filter %>% filter(df_r_filter$ID == 6737)
+
+ggp_r_0_4 = ggp(dataframe = df_r_0_4, df_r_0_4$line, df_r_0_4$ID)
+ggp_r_0_5 = ggp(dataframe = df_r_0_5, df_r_0_5$line, df_r_0_5$ID)
+ggp_r_0_7 = ggp(dataframe = df_r_0_7, df_r_0_7$line, df_r_0_7$ID)
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_r_0_4, ggp_r_0_5, ggp_r_0_7, ncol = 2, nrow = 2)))
+```
+
+
+### b. Données normalisées par le poids initial (poids à 8 jours) : 
+
+```{r, fig.width=15, fig.height=7}
+df_weight_norm = df_weight
+df_weight_nona = na.omit(df_weight)
+df_mean_weight = aggregate(df_weight_nona[, 5:8], list(df_weight_nona$line), mean)
+
+l_ply(1:nrow(df_weight),
+       function(x){
+         mean_d8_S = df_mean_weight$d8weight[1] 
+         mean_d8_DD = df_mean_weight$d8weight[2] 
+         mean_d8_C = df_mean_weight$d8weight[3] 
+         mean_d8_R = df_mean_weight$d8weight[4]
+         if(!is.na(df_weight[x,5])){
+           df_weight_norm[x,5:8]<<-df_weight[x,5:8] / df_weight[x,5]
+         }else{
+           if(df_weight[x,2] == "S+"){
+             df_weight_norm[x,6:8]<<-df_weight[x,6:8] / mean_d8_S
+           }
+           if(df_weight[x,2] == "DD"){
+             df_weight_norm[x,6:8]<<-df_weight[x,6:8] / mean_d8_DD
+           }
+           if(df_weight[x,2] == "A"){
+             df_weight_norm[x,6:8]<<-df_weight[x,6:8] / mean_d8_C
+           }
+           if(df_weight[x,2] == "B"){
+             df_weight_norm[x,6:8]<<-df_weight[x,6:8] / mean_d8_R
+           }
+         }
+})
+
+df_long_norm = pivot_longer(df_weight_norm, cols=5:8, names_to = "age", values_to = "weight")
+df_long_norm$age[df_long_norm$age == c("d8weight", "d21weight", "d36weight", "d78weight")] <- c(8, 21, 36, 78)
+df_order_norm = df_long_norm[order(as.numeric(df_long_norm$age)),]
+df_order_norm 
+
+ggp <- function(dataframe, color) {
+ggplot(dataframe, aes(x=as.numeric(dataframe$age), y=weight, color=color, shape=color)) +
+  geom_point() + geom_smooth(method=lm, se=FALSE, fullrange=TRUE) + labs(x = "age") + 
+  stat_fit_glance(method = "lm",
+                  label.x = "right", label.y = "bottom", size=3.5,
+                  method.args = list(formula = y ~ x),
+                  mapping = aes(label = sprintf('r^2~"="~%.3f~~italic(P)~"="~%.2g',
+                                stat(r.squared), stat(p.value))), parse = TRUE)
+}
+
+ggp_line = ggp(dataframe = df_long_norm, df_long_norm$line)
+ggp_sex = ggp(dataframe = df_long_norm, df_long_norm$sex)
+ggp_treat = ggp(dataframe = df_long_norm, df_long_norm$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_line, ggp_sex, ggp_treat, ncol = 2, nrow = 2)))
+```
+
+```{r}
+# Table of r² for each individual:
+df_long_norm$ID <- as.factor(as.character(df_long_norm$ID))
+df_long_norm$weigth <- as.numeric(df_long_norm$weight)
+df_long_norm
+df_long_norm$age <- as.numeric(df_long_norm$age)
+rsq_values_norm = lapply(levels(df_long_norm$ID), function(x){sdf=df_long_norm[which(df_long_norm$ID==x),];if(nrow(sdf)>=2){c(x,summary(lm(weight~age,data=sdf))$r.squared)}else{NULL};})
+
+rsq_values_norm = rsq_values_norm[!sapply(rsq_values_norm,is.null)]
+df_r_norm = do.call(rbind.data.frame, rsq_values_norm)
+colnames(df_r_norm)<-c("ID","rsquarred_norm")
+df_r_norm$ID = as.character(df_r_norm$ID)
+df_r_norm$rsquarred_norm = as.numeric(as.character(df_r_norm$rsquarred_norm))
+
+# Distribution of r² :
+hist <- function(dataframe, x.var) {
+  x.var = rlang::sym(x.var)
+  ggp <- ggplot(dataframe, aes(x= !! x.var)) +
+    geom_histogram(alpha=0.5, position="identity", xlim=c(0,1)) +  
+    scale_x_continuous(limits = c(0, 1)) +
+    theme(legend.title = element_blank())
+  return(ggp)
+}
+
+hist(dataframe = df_r_norm, x.var = "rsquarred_norm")
+
+# p_values :
+slope_values_norm = lapply(levels(df_long_norm$ID), function(x){sdf=df_long_norm[which(df_long_norm$ID==x),];if(nrow(sdf)>=2){c(x,summary(lm(weight~age,data=sdf))$coefficient[2,1])}else{NULL};})
+slope_values_norm = slope_values_norm[!sapply(slope_values_norm,is.null)]
+df_slope_norm = do.call(rbind.data.frame, slope_values_norm)
+colnames(df_slope_norm)<-c("ID","slope_norm")
+df_slope_norm$ID = as.character(df_slope_norm$ID)
+df_slope_norm$slope_norm = as.numeric(as.character(df_slope_norm$slope_norm))
+```
+
+```{r}
+# Addition of slopes (growth speed) of non-normalized (rsquarred) and normalized (rsquarred_norm) data:
+df_diff <- Reduce(merge, list(df_diff, df_slope, df_slope_norm))
+suppressWarnings(suppressMessages(attach(df_diff)))
+suppressWarnings(suppressMessages(attach(df)))
+```
+
+## Identification of outliers:
+
+```{r}
+# Outliers 3 standard deviations from the mean:
+
+# Mean weight at 78 days and standard deviation (sd) group by line and sex : 
+# df_mean_sd = df %>% group_by(line, sex, treat, batch) %>% summarise(mean = mean(na.omit(d78weight)), sd = sd(na.omit(d78weight)))
+# df_mean_sd
+
+# df["d8weight"][df["ID"] == 7090] %in% df_mean_sd[(df_mean_sd["line"]=="A" & df_mean_sd["sex"]=="M" & df_mean_sd["treat"]=="Genistein")]
+```
+
+```{r,fig.width=16, fig.height=4}
+# Identification of outliers for 5Aza (according to the boxplot visualization):
+merged_table = merge(df_long_norm, df_r_norm, by.x="ID", by.y="ID")
+head(merged_table)
+test = df_diff[df_diff$treat=="5Aza",]
+min = test[test$slope_norm==min(test$slope_norm),]$ID 
+max = test[test$slope_norm==max(test$slope_norm),]$ID  
+df_6736 <- merged_table %>% filter(merged_table$ID == 6736)
+df_1982 <- merged_table  %>% filter(merged_table $ID == 1982)
+
+ggp <- function(dataframe, color, title) {
+  colors="red"
+  if(color=="A"){
+    colors = "turquoise3"
+  }else if(color=="B"){
+    colors = "darkorchid1"
+  }
+  
+  gg <- ggplot(dataframe, aes(x=as.numeric(dataframe$age), y=weight, color=color, shape=color)) +
+  geom_point(color=colors) + geom_smooth(method=lm, se=FALSE, fullrange=TRUE, color=colors) + labs(x = "age") + 
+  stat_fit_glance(method = "lm",
+                  label.x = "right", label.y = "bottom", size=3.5,
+                  method.args = list(formula = y ~ x), 
+                  mapping = aes(label = sprintf('r^2~"="~%.3f~~italic(P)~"="~%.2g', 
+                                stat(r.squared), stat(p.value))), parse = TRUE, color=colors) 
+  ggp <- gg + ggtitle(title)
+} 
+
+ggp_6736 = ggp(dataframe = df_6736, df_6736$line, df_6736$ID) # ID 6736 => bad slope, to delete
+ggp_1982 = ggp(dataframe = df_1982, df_1982$line, df_1982$ID) # ID 1982 => good slop, to conserve
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_6736, ggp_1982, ncol = 2, nrow = 1)))
+
+# Outliers deletion from data:
+df_diff = df_diff[!df_diff$ID==min,] 
+df["d78weight"][df$ID==min,] <- NA
+```
+```{r, fig.width=15, fig.height=7}
+df_r_norm_filter <- merged_table %>% filter(rsquarred_norm < 0.75)
+df_r_norm_filter = df_r_norm_filter[order(df_r_norm_filter$rsquarred_norm),]
+df_r_0_4 <- df_r_norm_filter %>% filter(df_r_norm_filter$ID == 7090)
+df_r_0_5 <- df_r_norm_filter %>% filter(df_r_norm_filter$ID == 2118)
+df_r_0_7 <- df_r_norm_filter %>% filter(df_r_norm_filter$ID == 6737)
+
+ggp_r_0_4 = ggp(dataframe = df_r_0_4, df_r_0_4$line, df_r_0_4$ID)
+ggp_r_0_5 = ggp(dataframe = df_r_0_5, df_r_0_5$line, df_r_0_5$ID)
+ggp_r_0_7 = ggp(dataframe = df_r_0_7, df_r_0_7$line, df_r_0_7$ID)
+
+suppressWarnings(suppressMessages(grid.arrange(ggp_r_0_4, ggp_r_0_5, ggp_r_0_7, ncol = 2, nrow = 2)))
+```
+
+# II. Distribution des données :
+
+```{r}
+# Mean weight at 78 days and standard deviation (sd) group by line and sex : 
+df %>% group_by(line) %>% summarise(mean = mean(na.omit(d78weight)), sd = sd(na.omit(d78weight)))
+df %>% group_by(line, sex) %>% summarise(mean = mean(na.omit(d78weight)), sd = sd(na.omit(d78weight)))
+
+# Mean age1stegg and standard deviation (sd) for each line : 
+df %>% group_by(line) %>% summarise(mean = mean(na.omit(age1stegg)), sd = sd(na.omit(age1stegg)))
+
+# Mean eggNumber and standard deviation (sd) for each line : 
+df %>% group_by(line) %>% summarise(mean = mean(na.omit(eggNumber)), sd = sd(na.omit(eggNumber)))
+
+# Mean and sd slope_norm :
+df_diff %>% group_by(treat, line) %>% summarise(mean = mean(na.omit(slope_norm)), sd = sd(na.omit(slope_norm)))
+# --> Traitements 5Aza et Génistéine : diminution significative de la vitesse de croissance des cailles, surtout pour la lignée Line A
+```
+
+## 1. Histogrammes (count) :
+
+```{r}
+# Histogramme / courbe de densité : weight en fonction du sexe des individus :
+hist_legend <- function(dataframe, x.var, color) {
+  x.var = rlang::sym(x.var)
+    if(color==sex){
+      title = "Sex"
+      colors=c("coral", "cyan3")
+    }else{
+      title = "Line"
+      colors=c("orange2", "seagreen4", "gold1", "slateblue")
+    }
+  ggp <- ggplot(dataframe, aes(x= !! x.var, color=color, fill=color)) + theme_bw(base_size = 16) +
+    geom_histogram(alpha=0.5) + geom_density(alpha=.2) + guides(fill=guide_legend(title=title)) +
+    guides(color=FALSE) + scale_color_manual(values=colors) + scale_fill_manual(values=colors, na.value = "grey54") 
+  legend <- get_legend(ggp)
+  return(legend)
+}
+
+hist_weight <- function(dataframe, x.var, color, x_label) {
+  x.var = rlang::sym(x.var)
+  y_label <- ""
+  color_name = deparse(substitute(color))
+  if(x.var == "slope_norm" || x.var == "d8weight"){
+    y_label="Counts"
+  }
+  if(color_name=="sex" || color_name=="df_diff$sex" || color_name=="batch" || color_name=="df_diff$batch"){
+    colors=c("coral", "cyan3")
+  }else if(color_name=="line" || color_name=="df_diff$line"){
+    colors=c("orange2", "seagreen4", "gold1", "slateblue")
+  }else{
+    colors=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2")
+  }
+  ggp <- ggplot(dataframe, aes(x= !! x.var, color=color, fill=color)) +
+    geom_histogram(alpha=0.5, position="identity", show.legend = FALSE) +
+    labs(x=x_label, y=y_label) + scale_color_manual(values=colors, na.value = "grey54") +
+    scale_fill_manual(values=colors, na.value = "grey54") + theme_bw(base_size = 16)
+  return(ggp)
+}
+
+hist_egg <- function(dataframe, x.var, color, x_label) {
+  x.var = rlang::sym(x.var)
+  nb_bar = length(table(dataframe[toString(x.var)]))
+  color_name = deparse(substitute(color))
+  y_label="Counts"
+  if(x.var == "eggNumber" || x.var == "age1stegg"){
+    y_label <- ""
+  }
+  if(color_name=="sex" || color_name=="df_diff$sex"){
+    colors="coral"
+  }else if(color_name=="line" || color_name=="df_diff$line"){
+    colors=c("orange2", "seagreen4", "gold1", "slateblue")
+  }else if(color_name=="batch" || color_name=="df_diff$batch"){
+    colors=c("coral", "cyan3")
+  }else{
+    colors=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2")
+  }
+  ggp <- ggplot(dataframe, aes(x= !! x.var, color=color, fill=color)) +
+    geom_histogram(bins = nb_bar, alpha=0.5, position="identity", show.legend = FALSE) +
+    scale_color_manual(values=colors) + scale_fill_manual(values=colors) +
+    labs(x=x_label, y=y_label) + theme_bw(base_size = 16)
+  return(ggp)
+}
+```
+
+### a. Histogrammes en fonction du sexe : 
+
+```{r,fig.width=15, fig.height=7}
+suppressWarnings(suppressMessages({legend_a = hist_legend(dataframe = df, x.var = "d8weight", sex) 
+h_d8_sex = hist_weight(dataframe = df, x.var = "d8weight", sex, "Weight at 8 days") 
+h_d21_sex = hist_weight(dataframe = df, x.var = "d21weight", sex, "Weight at 21 days") 
+h_d36_sex = hist_weight(dataframe = df, x.var = "d36weight", sex, "Weight at 36 days") 
+h_d78_sex = hist_weight(dataframe = df, x.var = "d78weight", sex, "Weight at 78 days") 
+h_slope_norm_sex = hist_weight(dataframe = df_diff, x.var = "slope_norm", df_diff$sex, "Growth rate") 
+h_age1stegg_sex = hist_egg(dataframe = df, x.var = "age1stegg", sex, "Age at first egg laid") 
+h_eggNumber_sex = hist_egg(dataframe = df, x.var = "eggNumber", sex, "Egg number laid")
+
+# pdf(file = "figures/supp_data_1_a.pdf", width=15, height=7)
+grid.arrange(h_d8_sex, h_d21_sex, h_d36_sex, h_d78_sex, 
+             h_slope_norm_sex, h_age1stegg_sex, h_eggNumber_sex, legend_a, 
+             ncol = 4, nrow = 2)}))
+# dev.off()
+```
+**Conclusion :** 
+
+- *8, 21 et 36 jours :* pas de différence de poids entre les mâles (M) et femelles (F)
+- *78 jours :* les femelles sont plus lourdes que les males 
+- *âge au premier oeuf :* entre 50 et 60 jours pour la majorité
+- *nombre d'oeuf :* entre 15 et 25 oeufs pour la majorité, décalage sur la droite des femelles comme à 78 jours 
+
+=> La différence de poids des F à 78 jours : les F sont plus lourdes que les M, la morphologie des F évolue en fonction de leur âge et par le fait qu'elles pondent des oeufs 
+
+### b. Histogrammes en fonction des lignées : 
+
+```{r,fig.width=15, fig.height=7}
+suppressWarnings(suppressMessages({legend_b = hist_legend(dataframe = df, x.var = "d8weight", line)
+h_d8_line = hist_weight(dataframe = df, x.var = "d8weight", line, "Weight at 8 days")
+h_d21_line = hist_weight(dataframe = df, x.var = "d21weight", line, "Weight at 21 days")
+h_d36_line = hist_weight(dataframe = df, x.var = "d36weight", line,"Weight at 36 days")
+h_d78_line = hist_weight(dataframe = df, x.var = "d78weight", line, "Weight at 78 days")
+h_slope_norm_line = hist_weight(dataframe = df_diff, x.var = "slope_norm", df_diff$line, "Growth rate")
+h_age1stegg_line = hist_egg(dataframe = df, x.var = "age1stegg", line, "Age at first egg laid")
+h_eggNumber_line = hist_egg(dataframe = df, x.var = "eggNumber", line, "Egg number laid")
+
+# pdf(file = "figures/supp_data_1_b.pdf", width=15, height=7)
+grid.arrange(h_d8_line, h_d21_line, h_d36_line, h_d78_line, 
+             h_slope_norm_line, h_age1stegg_line, h_eggNumber_line, legend_b, 
+             ncol = 4, nrow = 2)}))
+# dev.off()
+```
+**Conclusion :**
+
+- *8, 21, 36, 78 jours :* 2 groupes de lignée (s+/dd et Line A/Line B) 
+
+=> Line A/Line B sont plus lourdes que S+/DD, ont leur premier oeuf plus tôt et pondent plus d'oeufs
+
+=> Pas de différence nette entre les deux lignées Line A/Line B et les deux lignées S+/DD
+
+```{r,fig.width=15, fig.height=14}
+suppressWarnings(suppressMessages({first_col = plot_grid(h_d8_sex, h_d21_sex, h_d36_sex, h_d78_sex, 
+             h_slope_norm_sex, h_age1stegg_sex, h_eggNumber_sex, legend_a, ncol=4, nrow=2, labels = "a", label_size = 20)
+second_col = plot_grid(h_d8_line, h_d21_line, h_d36_line, h_d78_line, 
+             h_slope_norm_line, h_age1stegg_line, h_eggNumber_line, legend_b, ncol=4, nrow=2, labels = "b", label_size = 20)
+perfect = plot_grid(first_col, second_col, ncol=1, nrow=2, rel_widths = c(15,15), rel_heights = c(10,10))
+
+pdf(file = "figures/supp_data_1.pdf", width=15, height=14)
+suppressWarnings(suppressMessages(perfect))}))
+dev.off()
+```
+### c. Histogrammes en fonction du lot: 
+
+```{r,fig.width=15, fig.height=7}
+suppressWarnings(suppressMessages({h_d8_batch = hist_weight(dataframe = df, x.var = "d8weight", batch, "Weight at 8 days")
+h_d21_batch = hist_weight(dataframe = df, x.var = "d21weight", batch, "Weight at 21 days")
+h_d36_batch = hist_weight(dataframe = df, x.var = "d36weight", batch,"Weight at 36 days")
+h_d78_batch = hist_weight(dataframe = df, x.var = "d78weight", batch, "Weight at 78 days")
+h_slope_norm_batch = hist_weight(dataframe = df_diff, x.var = "slope_norm", df_diff$batch, "Growth rate")
+h_age1stegg_batch = hist_egg(dataframe = df, x.var = "age1stegg", batch, "Age at first egg laid")
+h_eggNumber_batch = hist_egg(dataframe = df, x.var = "eggNumber", batch, "Egg number laid")
+
+grid.arrange(h_d8_batch, h_d21_batch, h_d36_batch, h_d78_batch,
+             h_slope_norm_batch, h_age1stegg_batch, h_eggNumber_batch, 
+             ncol = 4, nrow = 2)}))
+```
+
+```{r,fig.width=15, fig.height=10}
+# Batch 1 at 21 days and batch 2 at 27 jours ? => ratio egg_nb_batch1 / egg_nb_batch2 = 21 / 27 ? :
+mean_eggnb_batch1 = mean(df$eggNumber[which(df$batch == "1")],  na.rm = TRUE)
+mean_eggnb_batch2 = mean(df$eggNumber[which(df$batch == "2")],  na.rm = TRUE)
+
+# mean_eggnb_batch1 / mean_eggnb_batch2 # 1.018176
+# 21/27 # 0.7777778
+```
+
+**Conclusion :**
+
+- *8, 21, 36, 78 jour et âge au premier oeuf :* pas de différence 
+- *nombre d'oeuf :* plus important pour batch 2 que batch 1 => batch 1 à 21 jours et batch 2 à 27 jours
+
+### d. Histogrammes en fonction du lot et sexe : 
+
+```{r}
+hist_sex_batch <- function(dataframe, x.var, color) {
+  x.var = rlang::sym(x.var)
+  nb_bar = length(table(dataframe[toString(x.var)]))
+  nb_conditions = length(unique(color))
+  ggp <- ggplot(dataframe, aes(x= !! x.var, color=color, fill=color)) +
+    geom_histogram(alpha=0.5, position="identity") +
+    geom_density(alpha=.2) + theme(legend.title = element_blank()) + 
+    facet_wrap(~batch, ncol = 4) 
+  return(ggp)
+}
+```
+
+```{r}
+suppressWarnings(suppressMessages(hist_sex_batch(dataframe = df, x.var = "d8weight", df$sex)))
+# length(which(df$sex == "F" & df$batch == "1")) # 447 --> 446
+# length(which(df$sex == "M" & df$batch == "1")) # 517 --> 516
+# length(which(df$sex == "F" & df$batch == "2")) # 532 
+# length(which(df$sex == "M" & df$batch == "2")) # 433 
+```
+
+**Conclusion :**  Plus de M que de F pour batch 1, plus de F que de M pour batch 2
+
+### e. Histogrammes en fonction du traitement :
+
+```{r,fig.width=15, fig.height=7}
+suppressWarnings(suppressMessages({h_d8_treat = hist_weight(dataframe = df, x.var = "d8weight", treat, "Weight at 8 days")
+h_d21_treat = hist_weight(dataframe = df, x.var = "d21weight", treat, "Weight at 21 days")
+h_d36_treat = hist_weight(dataframe = df, x.var = "d36weight", treat,"Weight at 36 days")
+h_d78_treat = hist_weight(dataframe = df, x.var = "d78weight", treat,"Weight at 78 days")
+h_slope_norm_treat = hist_weight(dataframe = df_diff, x.var = "slope_norm", df_diff$treat, "Growth rate")
+h_age1stegg_treat = hist_egg(dataframe = df, x.var = "age1stegg", treat, "Age at first egg")
+h_eggNumber_treat = hist_egg(dataframe = df, x.var = "eggNumber", treat, "Egg number")
+
+grid.arrange(h_d8_treat, h_d21_treat, h_d36_treat, h_d78_treat, 
+             h_slope_norm_treat, h_age1stegg_treat, h_eggNumber_treat, 
+             ncol = 4, nrow = 2)}))
+```
+
+**Conclusion:**
+
+=> Il ne semble pas y avoir de différence entre les différents traitements.
+
+## 2. Boxplots:
+
+```{r}
+boxplot_btreat <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color, fill=factor(batch))) +
+    geom_boxplot() + theme(legend.title = element_blank()) + 
+    facet_wrap(~line, ncol = 4) +
+    theme(axis.text.x = element_text(angle = 90))
+  return(p)
+}
+
+boxplot <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) +
+    geom_boxplot() + theme(legend.title = element_blank())
+  return(p)
+}
+
+boxplot_sex_line <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color, fill=factor(sex))) +
+    geom_boxplot() + theme(legend.title = element_blank()) + 
+    facet_wrap(~line, ncol = 4) +
+    theme(axis.text.x = element_text(angle = 90))
+  return(p)
+}
+```
+
+### a. Boxplots en fonction du traitement, lignée et lot :
+
+```{r, fig.width=10, fig.height=7}
+# Treat:
+box_age1stegg_btreat = boxplot_btreat(dataframe = df, x.var = "treat", y.var = "eggNumber", df$line)
+box_eggNumber_btreat = boxplot_btreat(dataframe = df, x.var = "treat", y.var = "age1stegg", df$line)
+
+suppressWarnings(suppressMessages(grid.arrange(box_age1stegg_btreat, box_eggNumber_btreat, ncol=1, nrow=2)))
+```
+
+**Conclusion:**
+
+- *nombre d'oeuf :* plus important pour batch 2 que batch 1 (=> batch 1 à 21 jours et batch 2 à 27 jours)
+
+
+### b. Boxplots en fonction du traitement, lignée et sexe :
+
+```{r,fig.width=16, fig.height=15}
+# Treat:
+box_d8_tline = boxplot_sex_line(dataframe = df, x.var = "treat", y.var = "d8weight", df$line)
+box_d21_tline = boxplot_sex_line(dataframe = df, x.var = "treat", y.var = "d21weight", df$line)
+box_d36_tline = boxplot_sex_line(dataframe = df, x.var = "treat", y.var = "d36weight", df$line)
+box_d78_tline = boxplot_sex_line(dataframe = df, x.var = "treat", y.var = "d78weight", df$line)
+box_age1stegg_tline = boxplot(dataframe = df, x.var = "line", y.var = "age1stegg", df$treat)
+box_eggNumber_tline = boxplot(dataframe = df, x.var = "line", y.var = "eggNumber", df$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(box_d8_tline, box_d21_tline, box_d36_tline, box_d78_tline, box_age1stegg_tline, box_eggNumber_tline, ncol = 2, nrow = 4)))
+```
+
+**Conclusion:**
+
+- Comme vu précédemment : 2 groupes s+/DD et Line A/Line B, Line A/Line B sont plus lourdes que S+/DD à tous les âges
+- *8, 21 et 36 jours :* pas d'effet traitement
+- *78 jours :* pas d'effet traitement, pour chaque lignée, femelles plus lourdes que les mâles
+- *âge au premier oeuf :* plus faible pour Line A/Line B
+- *nombre d'oeufs :* plus important pour Line A/Line B
+
+L'intéraction sexe/traitement n'est pas très visible.
+
+### c. Boxplots en fonction du sexe et traitement :
+
+```{r,fig.width=16, fig.height=15}
+boxplot_sex_treat <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) +
+    # geom_violin(trim=FALSE) + geom_boxplot(width=0.1)
+    geom_boxplot() + theme(legend.title = element_blank()) + 
+    facet_wrap(~sex, ncol = 4) +
+    theme(axis.text.x = element_text(angle = 90))
+  return(p)
+}
+
+# violin plot : indique la forme de la distribution : montre la courbe de densité de probabilité des différentes valeurs (density plot width = fequency)
+
+# Treat:
+box_d8_tline = boxplot_sex_treat(dataframe = df, x.var = "treat", y.var = "d8weight", df$treat)
+box_d21_tline = boxplot_sex_treat(dataframe = df, x.var = "treat", y.var = "d21weight", df$treat)
+box_d36_tline = boxplot_sex_treat(dataframe = df, x.var = "treat", y.var = "d36weight", df$treat)
+box_d78_tline = boxplot_sex_treat(dataframe = df, x.var = "treat", y.var = "d78weight", df$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(box_d8_tline, box_d21_tline, box_d36_tline, box_d78_tline, ncol = 2, nrow = 4)))
+```
+
+**Conclusion :**
+
+- *8, 21, 36 et 78 jours :* il ne semble pas y avoir de différence de poids entre F et entre M en fonction du traitement.
+
+### d. Boxplots de l'évolution du poids en fonction de la lignée et du traitement :
+
+```{r,fig.width=16, fig.height=13}
+boxplot <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) +
+    geom_boxplot() + theme(legend.title = element_blank()) + 
+    facet_wrap(~line, ncol = 4) +
+    theme(axis.text.x = element_text(angle = 90))
+  return(p)
+}
+
+box_d8_d21 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d8_d21", df_diff$treat)
+box_d36_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d36_d78", df_diff$treat)
+box_d8_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d8_d78", df_diff$treat)
+box_d21_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d21_d78", df_diff$treat)
+box_slope = boxplot(dataframe = df_diff, x.var = "treat", y.var = "slope", df_diff$treat)
+box_slope_norm = boxplot(dataframe = df_diff, x.var = "treat", y.var = "slope_norm", df_diff$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(box_d8_d21, box_d36_d78, box_d8_d78 , box_d21_d78, box_slope, box_slope_norm, ncol = 2, nrow = 3)))
+```
+
+
+```{r}
+boxplot_legend <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) + theme_bw(base_size = 16) +
+    geom_boxplot() + theme(legend.title = element_blank(),
+          strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+    scale_x_discrete(name ="Treatment") + scale_y_continuous(name = "Growth rate") + 
+    scale_color_manual(values=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2"))
+  legend = get_legend(p)
+  return(legend)
+}
+
+# Line grouped / treat :
+boxplot <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) + theme_bw(base_size = 16) +
+    geom_boxplot() + theme(legend.title = element_blank(), 
+                           axis.text.x = element_text(angle = 45, hjust = 1), 
+                           legend.position='none',
+                           strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+                           strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    facet_wrap(~"All lines combined", ncol = 1) + 
+    scale_x_discrete(name ="Treatment") + scale_y_continuous(name = "Growth rate") +
+    scale_color_manual(values=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2"))
+  return(p)
+}
+
+boxplot_sex_treat <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) + theme_bw(base_size = 16) +
+    geom_boxplot() + theme(legend.title = element_blank(), 
+                           axis.text.x = element_text(angle = 45, hjust = 1), 
+                           legend.position='none',
+                           strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+                           strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    facet_wrap(~sex, ncol = 4) + 
+    scale_x_discrete(name ="Treatment") + scale_y_continuous(name = "Growth rate") + 
+    scale_color_manual(values=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2"))
+  return(p)
+}
+
+boxplot_line_treat <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) + theme_bw(base_size = 16) +
+    geom_boxplot() + theme(legend.title = element_blank()) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.ticks.y = element_blank(), axis.text.y = element_blank(),
+          strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    facet_wrap(~line, ncol = 4) + 
+    scale_x_discrete(name ="Treatment") + labs(y="") + 
+    scale_color_manual(values=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2"))
+  return(p)
+}
+
+boxplot_batch_treat <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) + theme_bw(base_size = 16) +
+    geom_boxplot() + theme(legend.title = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank()) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    facet_wrap(~batch, ncol = 4) + 
+    scale_x_discrete(name ="Treatment") + labs(y="") + 
+    scale_color_manual(values=c("red1", "darkorange1", "springgreen4", "dodgerblue1", "orchid2"))
+  return(p)
+}
+```
+
+```{r,fig.width=17, fig.height=6}
+# Without sex NA : 
+box_slope_norm = boxplot(dataframe = df_diff, x.var = "treat", y.var = "slope_norm", df_diff$treat)
+box_slope_norm_line = boxplot_line_treat(dataframe = df_diff, x.var = "treat", y.var = "slope_norm", df_diff$treat)
+df_sex_no_na = df_diff[!is.na(df_diff$sex), ]
+box_slope_norm_sex = boxplot_sex_treat(dataframe = df_sex_no_na, x.var = "treat", y.var = "slope_norm", df_sex_no_na$treat)
+box_slope_norm_batch = boxplot_batch_treat(dataframe = df_diff, x.var = "treat", y.var = "slope_norm", df_diff$treat)
+
+legend = boxplot_legend(dataframe = df_diff, x.var = "treat", y.var = "slope_norm", df_diff$treat)
+
+first_col_fig_1 = plot_grid(box_slope_norm, ncol=1, nrow=1, labels = "a", label_size = 20)
+second_col_fig_1 = plot_grid(box_slope_norm_line, ncol=1, nrow=1, labels = "b", label_size = 20)
+fig_1 = plot_grid(first_col_fig_1, second_col_fig_1, ncol=2, nrow=1, rel_widths = c(3,11), rel_heights = c(6,6))
+
+pdf(file = "figures/figure_1.pdf", height=6, width=17)
+fig_1
+dev.off()
+
+first_col_supp2 = plot_grid(box_slope_norm_sex, ncol=1, nrow=1, labels = "a", label_size = 20)
+second_col_supp2= plot_grid(box_slope_norm_batch, ncol=1, nrow=1, labels = "b", label_size = 20)
+supp_2 = plot_grid(first_col_supp2, second_col_supp2, ncol=2, nrow=1, rel_widths = c(4,4.5), rel_heights = c(7,7))
+
+pdf(file = "figures/supp_data_2.pdf", height=6, width=15)
+supp_2 
+dev.off()
+```
+
+**Conclusion**
+
+- *d8-d21, d36-d78 :* stepAIC => bisphénol-contrôle
+- *d8-d78, d21-d78 :* stepAIC => 5Aza-Contrôle
+- *pente de la droite de croissance :* stepAIC => effet significatif de tous les traitements par rapport au contrôle, 5Aza:TI/Bisphénol/Génistéine
+- *pente sur données normalisées :*     
+    - stepAIC => effet significatif de tous les traitements par rapport au contrôle, 5Aza:TI/Bisphénol/Génistéine
+    - stepAIC => effet Génistéine-Contrôle pour lignée DD
+    - stepAIC => effets 5Aza-Contrôle/TI/Bisphénol pour lignée Line A 
+
+### e. Boxplots de l'évolution du poids en fonction du sexe et du traitement :
+
+```{r,fig.width=16, fig.height=8}
+boxplot <- function(dataframe, x.var, y.var, color) {
+  x.var = rlang::sym(x.var)
+  y.var = rlang::sym(y.var)
+  p <- ggplot(dataframe, aes(x= !! x.var, y= !! y.var, color=color)) +
+    geom_boxplot() + theme(legend.title = element_blank()) + 
+    facet_wrap(~sex, ncol = 4) +
+    theme(axis.text.x = element_text(angle = 90))
+  return(p)
+}
+
+box_d8_d21 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d8_d21", df_diff$treat)
+box_d36_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d36_d78", df_diff$treat)
+box_d8_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d8_d78", df_diff$treat)
+box_d21_d78 = boxplot(dataframe = df_diff, x.var = "treat", y.var = "d21_d78", df_diff$treat)
+
+suppressWarnings(suppressMessages(grid.arrange(box_d8_d21, box_d36_d78, box_d8_d78, box_d21_d78, ncol = 2, nrow = 2)))
+```
+
+**Conclusion :**
+
+- *d8-d21, d36-d78 :* stepAIC => F-Génistéine:F-Contrôle
+- *d8-d78 :* stepAIC => F-Génistéine:F-Contrôle
+- *d21-d78 :* stepAIC => F-5Aza:F-Contrôle
+
+
+# III. Analyses statistiques : 
+
+## 1. Régression linéaire :
+
+```{r,fig.width=16, fig.height=15}
+create_table <- function(dataframe, var) {
+  # Specification of variables to plot:
+  meas_vars <- colnames(df)[7:12]
+  # the data.frame() call strips the attributes from
+  # the frame returned by expand.grid()
+  controlTable <- data.frame(expand.grid(meas_vars, meas_vars, 
+                                         stringsAsFactors = FALSE))
+  # rename the columns
+  colnames(controlTable) <- c("x", "y")
+  # add the key column
+  controlTable <- cbind(
+    data.frame(pair_key = paste(controlTable[[1]], controlTable[[2]]),
+               stringsAsFactors = FALSE), controlTable)
+  # Create the new data frame, using rowrecs_to_blocks():
+  df_aug = rowrecs_to_blocks(df, controlTable, columnsToCopy = var)
+  splt <- strsplit(df_aug$pair_key, split = " ", fixed = TRUE)
+  df_aug$xv <- vapply(splt, function(si) si[[1]], character(1))
+  df_aug$yv <- vapply(splt, function(si) si[[2]], character(1))
+  # reorder the key columns to be the same order
+  # as the base version above
+  df_aug$xv <- factor(as.character(df_aug$xv), meas_vars)
+  df_aug$yv <- factor(as.character(df_aug$yv), meas_vars)
+  return(df_aug)
+}
+
+scatter_plot <- function(dataframe, x.var) {
+  x.var = rlang::sym(x.var)
+  sp <- suppressWarnings(suppressMessages(ggplot(dataframe, aes(x=x, y=y)) +
+    geom_point(aes(color= !! x.var, shape= !! x.var)) + geom_smooth(method=lm, se=FALSE) +
+    facet_grid(yv~xv, labeller = label_both, scale = "free") +
+    ggtitle("Scatter plot") +
+    scale_color_brewer(palette = "Dark2") +
+    ylab(NULL) + xlab(NULL) + 
+    stat_fit_glance(method = "lm",
+                  label.x = "right", label.y = "bottom", size=2.5,
+                  method.args = list(formula = y ~ x),
+                  mapping = aes(label = sprintf('r^2~"="~%.3f~~italic(P)~"="~%.2g',
+                                stat(r.squared), stat(p.value))), parse = TRUE)))
+  return(sp)
+}
+```
+
+### a. En fonction du sexe :
+
+```{r,fig.width=11, fig.height=9}
+# Create table:
+df_aug = create_table(dataframe=df, "sex")
+
+# Scatter plots:
+scatter_plot(dataframe = df_aug, x.var = "sex")
+```
+
+**Conclusion :**
+
+- Les poids semblent corrélés : plus les jours sont proches, plus la corrélation est forte 
+- Le nombre d'oeufs et l'âge au premier oeuf semblent corrélés 
+
+### b. En fonction du lot :
+
+```{r,fig.width=11, fig.height=9}
+# Create table:
+df_aug = create_table(dataframe=df, "batch")
+
+# Scatter plots:
+scatter_plot(dataframe = df_aug, x.var = "batch")
+```
+
+**Conclusion :**
+
+- Le nombre d'oeufs et l'âge au premier oeuf semblent corrélés : on dicerne bien les deux lots 
+
+
+### c. En fonction de la lignée :
+
+```{r,fig.width=11, fig.height=9}
+# Create table:
+df_aug = create_table(dataframe=df, "line")
+
+# Scatter plots:
+scatter_plot(dataframe = df_aug, x.var = "line")
+```
+
+### d. En fonction du traitement :
+
+```{r,fig.width=11, fig.height=9}
+# Create table:
+df_aug = create_table(dataframe=df, "treat")
+
+# Scatter plots:
+scatter_plot(dataframe = df_aug, x.var = "treat")
+```
+
+
+## 2. Variables indépendantes (aov (+) + TukeyHSD) :
+
+```{r}
+create_table_with_sign <- function(data, type) {
+  if(type=="treat"){data_sign = data.frame(data$treat)}
+  if(type=="sex:treat"){data_sign = data.frame(data$`sex:treat`)}
+  if(type=="treat:sex"){data_sign = data.frame(data$`treat:sex`)}
+  if(type=="line:treat"){data_sign = data.frame(data$`line:treat`)}
+  if(type=="line:treat:sex"){data_sign = data.frame(data$`line:treat:sex`)}
+  data_sign$sign <- ifelse(data_sign$p.adj < 0.001, "***",
+                                  ifelse(data_sign$p.adj < 0.01, "**",
+                                         ifelse(data_sign$p.adj < 0.05, "*",
+                                                ifelse(data_sign$p.adj < 0.1, ".",""))))
+  return(data_sign) }
+
+create_short_sign_table = function(data) {
+  final_data = data[data[, "sign"] != "",]
+  return(final_data) }
+
+create_sign_tukeyHSD_table <- function(data, type){
+  tab = create_table_with_sign(data=data, type)
+  final_tab = create_short_sign_table(data=tab)
+  return(final_tab) }
+```
+
+```{r,fig.width=15, fig.height=9}
+ess_d8weight <- aov(d8weight ~ line + batch + sex + treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d8weight")])
+summary(ess_d8weight)
+tuk_d8weight = TukeyHSD(ess_d8weight, 'treat')
+create_sign_tukeyHSD_table(tuk_d8weight, "treat")
+
+ess_d21weight <- aov(d21weight ~ line + batch + sex + treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d21weight")])
+summary(ess_d21weight)
+tuk_d21weight = TukeyHSD(ess_d21weight, 'treat')
+create_sign_tukeyHSD_table(tuk_d21weight, "treat")
+
+# ess_d36weight <- aov(d36weight ~ line + batch + sex + treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d36weight")])
+# summary(ess_d36weight)
+
+# ess_d78weight <- aov(d78weight ~ line + batch + sex + treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d78weight")])
+# summary(ess_d78weight)
+
+ess_age1stegg <- aov(age1stegg ~ line + batch + treat, data=df_egg)
+summary(ess_age1stegg)
+tuk_age1stegg = TukeyHSD(ess_age1stegg, 'treat')
+create_sign_tukeyHSD_table(tuk_age1stegg, "treat")
+
+ess_eggNumber <- aov(eggNumber ~ line + batch + treat, data=df_egg)
+summary(ess_eggNumber)
+tuk_eggNumber = TukeyHSD(ess_eggNumber, 'treat')
+create_sign_tukeyHSD_table(tuk_eggNumber, "treat")
+
+ess_d8_d21 <- aov(d8_d21 ~ line + batch + sex + treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d8_d21")])
+summary(ess_d8_d21)
+tuk_d8_d21 = TukeyHSD(ess_d8_d21, 'treat')
+create_sign_tukeyHSD_table(tuk_d8_d21,"treat")
+
+ess_slope_norm <- aov(slope_norm ~ line + batch + sex + treat, data=df_diff[,c("ID", "line", "sex", "batch", "treat", "slope_norm")])
+summary(ess_slope_norm)
+tuk_slope_norm = TukeyHSD(ess_slope_norm, 'treat')
+create_sign_tukeyHSD_table(tuk_slope_norm, "treat")
+```
+
+```{r,fig.width=20, fig.height=15}
+# Plots : treat:
+par(las=1, mar=c(4.1, 11, 2, 4.1), ps=22, mfrow=(c(3,3)))
+plot(tuk_d8weight, las=1, col="brown")
+title(main="d8weight")
+plot(tuk_d21weight, las=1, col="brown")
+title(main="d21weight")
+plot(tuk_d8_d21, las=1, col="brown")
+title(main="d8_d21")
+plot(tuk_age1stegg, las=1, col="brown")
+title(main="age1stegg")
+plot(tuk_eggNumber, las=1, col="brown")
+title(main="eggNumber")
+plot(tuk_slope_norm, las=1, col="brown")
+title(main="slope_norm")
+par(las=0)
+```
+
+```{r}
+# TukeyHSD plots : complexHeatmap :
+tukey_legend <- function(data) {
+  new_order = c("IC-Control", 
+              "Bisphenol-Control", "Bisphenol-IC", 
+              "Genistein-Control", "Genistein-IC", "Genistein-Bisphenol",
+              "5Aza-Control", "5Aza-IC", "5Aza-Bisphenol", "5Aza-Genistein")
+  tky_tmp = as.data.frame(data$treat)
+  tky = tky_tmp[match(new_order, rownames(tky_tmp)),]
+  tky$pair = rownames(tky)
+  tky["p adj"][tky["pair"]=="Bisphenol-Control"] <- 0.045
+  ggp <- ggplot(tky, aes(colour=cut(`p adj`, c(0, 0.01, 0.05, 1),
+                         label=c("p<0.01","p<0.05","Non-Sig")))) +
+    scale_color_manual(values=c("p<0.01" = "red", "p<0.05" = "darkorange1", "Non-Sig" = "grey36")) +
+    geom_hline(yintercept=0, lty="11", colour="grey30") +
+    geom_errorbar(aes(pair, ymin=lwr, ymax=upr), width=0.2) +
+    geom_point(aes(pair, diff)) +
+    labs(colour="") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_x_discrete(name ="Treatment pair") + scale_y_continuous(name = "Mean difference")
+    return(ggp)}
+
+plot_tukey <- function(data) {
+  data_name = deparse(substitute(data))
+  if(data_name=="tuk_d21weight"){
+    facet="'Weight at 21 days'"
+    name_scale_x = ""
+    name_scale_y = "Mean difference"
+  }else if(data_name=="tuk_age1stegg"){
+    facet="'Age at first egg laid'"
+    name_scale_x = "Treatment pair"
+    name_scale_y = ""
+  }else{
+    facet="'Growth rate'"
+    name_scale_x = ""
+    name_scale_y = ""
+  }
+  tky_tmp = as.data.frame(data$treat)
+  new_order = c("IC-Control", 
+              "Bisphenol-Control", "Bisphenol-IC", 
+              "Genistein-Control", "Genistein-IC", "Genistein-Bisphenol",
+              "5Aza-Control", "5Aza-IC", "5Aza-Bisphenol", "5Aza-Genistein")
+  tky = tky_tmp[match(new_order, rownames(tky_tmp)),]
+  tky$pair = rownames(tky)
+  tky$pair2 <- factor(tky$pair, as.character(tky$pair))
+    ggp <- ggplot(tky, aes(colour=cut(`p adj`, c(0, 0.01, 0.05, 1),
+                         label=c("p<0.01","p<0.05","Non-Sig")))) +
+    scale_color_manual(values=c("p<0.01" = "red", "p<0.05" = "darkorange1", "Non-Sig" = "grey36")) +
+    theme_bw(base_size = 16) +
+    geom_hline(yintercept=0, lty="11", colour="grey30") +
+    geom_errorbar(aes(pair2, ymin=lwr, ymax=upr), width=0.2) +
+    geom_point(aes(pair2, diff)) +
+    labs(colour="") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none",
+          strip.background = element_rect(color="black", fill="azure4", size=1, linetype="solid"),
+          strip.text.x = element_text(size = 12, color = "white", face = "bold")) +
+    scale_x_discrete(name=name_scale_x) + scale_y_continuous(name=name_scale_y) +
+    facet_wrap(as.formula(paste("~", facet)), ncol = 1)
+    return(ggp) }
+```
+
+```{r,fig.width=13, fig.height=5}
+tuk_d21_ggp = plot_tukey(data=tuk_d21weight)
+tuk_age1stegg_ggp = plot_tukey(data=tuk_age1stegg)
+tuk_slope_norm_ggp = plot_tukey(data=tuk_slope_norm)
+legend = get_legend(tukey_legend(data=tuk_slope_norm))
+
+pdf(file = "figures/supp_data_3.pdf", width=13, height=5)
+plot_grid(tuk_d21_ggp, tuk_age1stegg_ggp, tuk_slope_norm_ggp, legend, nrow=1, ncol=4, labels=c('a', 'b', 'c', ""), rel_widths = c(2,2,2,1), rel_heights = c(2,2,2,1))
+dev.off()
+```
+
+### Conclusion :
+
+- *8 jours :* effet bisphénol par rapport au contrôle
+- *21 jours :* effet bisphénol par rapport au contrôle (effet génistéine par rapport au contrôle ?) 
+- *36 jours :* pas d'effet traitement 
+- *78 jours :* pas d'effet traitement 
+- *âge au premier oeuf :* effet traitement mais pas de traitement particulier (effets Génistéine/Contrôle et Génistéine/Bisphénol => effet Génistéine ?)
+- *nombre d'oeufs :* pas d'effet traitement => effet genistein par rapport au control 
+
+
+|                    | **line** | **batch** | **sex** | **treat** | 
+| :-----------------:| :------: | :-------: | :-----: | :-------: | 
+| **d8weight**       | \*\*\*   | \*\*\*    |   NS    | .        |
+| **d21weight**      | \*\*\*   | \*\*\*    | \*\*\*  | \*        | 
+| **d36weight**      | \*\*\*   | \*        | \*\*\*  |    NS     | 
+| **d78weight**      | \*\*\*   |    NS     | \*\*\*  |    NS     |  
+| **age1stegg**      | \*\*\*   |    NS     |   NA    | \*        |  
+| **eggNumber**      | \*       |    NS     |   NA    |      .    |   
+| **d8_d21**         | \*\*\*   | \*\*\*    |\*\*\*   | \*        |
+| **d21_d36**        | \*\*\*   | \*\*\*    |\*\*\*   |     NS    | 
+| **d36_d78**        | \*\*\*   |    NS     |\*\*\*   |     NS    | 
+| **d8_d78**         | \*\*\*   |    NS     |\*\*\*   |     NS    |
+| **d8_d21_norm**    | \*\*\*   |    \*     |\*\*\*   |     NS    |
+| **d21_d36_norm**   | \*\*\*   | \*\*\*    |\*\*\*   |     NS    | 
+| **d36_d78_norm**   | \*\*\*   |    NS     |\*\*\*   |     NS    |
+| **d8_d78_norm**    | \*\*\*   | \*\*\*    |\*\*\*   |     NS    |
+| **slope**          | \*\*\*   |    \*     |\*\*\*   | \*\*\*    |  
+| **slope_norm**     | \*\*\*   | \*\*\*    |\*\*\*   | \*\*\*    | 
+ 
+
+Table: *Signif. codes:  0 '\*\*\*' 0.001 '\*\*' 0.01 '\*' 0.05 '.' 0.1 ' ' 1 ; NA = effet non testé ; NS = effet non significatif* 
+
+
+## 3. Intéraction entre variables (aov (*) + stepAIC + TukeyHSD) :
+
+
+```{r,fig.width=15, fig.height=13}
+# Intéraction entre variables :
+ess_d8weight <- stepAIC(aov(d8weight ~ line * batch * sex * treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d8weight")]))
+summary(ess_d8weight)
+tuk_d8weight <- TukeyHSD(ess_d8weight, 'treat')
+tuk_d8weight_sex_treat <- TukeyHSD(ess_d8weight, 'sex:treat')
+create_sign_tukeyHSD_table(tuk_d8weight, "treat")
+create_sign_tukeyHSD_table(tuk_d8weight_sex_treat, "sex:treat")
+
+ess_d21weight <- stepAIC(aov(d21weight ~ line * batch * sex * treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d21weight")]))
+summary(ess_d21weight)
+tuk_d21weight <- TukeyHSD(ess_d21weight, 'treat')
+tuk_d21weight_sex_treat <- TukeyHSD(ess_d21weight, 'sex:treat')
+create_sign_tukeyHSD_table(tuk_d21weight, "treat")
+create_sign_tukeyHSD_table(tuk_d21weight_sex_treat, "sex:treat")
+
+ess_d36weight <- stepAIC(aov(d36weight ~ line * batch * sex * treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d36weight")]))
+summary(ess_d36weight)
+tuk_d36weight_sex_treat <- TukeyHSD(ess_d36weight, 'sex:treat')
+create_sign_tukeyHSD_table(tuk_d36weight_sex_treat, "sex:treat")
+
+ess_d78weight <- stepAIC(aov(d78weight ~ line * batch * sex * treat, data=df[,c("ID", "line", "sex", "batch", "treat", "d78weight")]))
+summary(ess_d78weight)
+tuk_d78weight_sex_treat <- TukeyHSD(ess_d78weight, 'sex:treat')
+create_sign_tukeyHSD_table(tuk_d78weight_sex_treat, "sex:treat")
+
+ess_age1stegg <- stepAIC(aov(age1stegg ~ line * batch * treat, data=df_egg))
+summary(ess_age1stegg)
+tuk_age1stegg <- TukeyHSD(ess_age1stegg, 'treat')
+create_sign_tukeyHSD_table(tuk_age1stegg, "treat")
+
+ess_eggNumber <- stepAIC(aov(eggNumber ~ line * batch * treat, data=df_egg))
+summary(ess_eggNumber)
+tuk_eggNumber <- TukeyHSD(ess_eggNumber, 'treat')
+create_sign_tukeyHSD_table(tuk_eggNumber, "treat")
+
+ess_slope_norm <- stepAIC(aov(slope_norm ~ line * batch * sex * treat, data=df_diff[,c("ID", "line", "sex", "batch", "treat", "slope_norm")]))
+summary(ess_slope_norm)
+tuk_slope_norm <- TukeyHSD(ess_slope_norm, 'treat')
+tuk_slope_norm_line_treat <- TukeyHSD(ess_slope_norm, 'line:treat')
+create_sign_tukeyHSD_table(tuk_slope_norm, "treat")
+create_sign_tukeyHSD_table(tuk_slope_norm_line_treat, "line:treat")
+```
+
+```{r,fig.width=20, fig.height=20}
+# # Plots:
+# ## Treat:
+# par(las=1, mar=c(4.1, 11, 2, 4.1), ps=8, mfrow=(c(3,3)))
+# plot(tuk_d8weight, las=1, col="brown")
+# title(main="d8weight")
+# plot(tuk_d21weight, las=1, col="brown")
+# title(main="d21weight")
+# plot(tuk_d8_d21, las=1, col="brown")
+# title(main="d8_d21")
+# plot(tuk_slope_norm, las=1, col="brown")
+# title(main="slope_norm")
+# plot(tuk_age1stegg, las=1, col="brown")
+# title(main="age1stegg")
+# plot(tuk_eggNumber, las=1, col="brown")
+# title(main="eggNumber")
+# 
+# ## Sex:treat:
+# par(las=1, mar=c(4.1, 11, 2, 4.1), ps=8, mfrow=(c(3,3)))
+# plot(tuk_d8weight_sex_treat, las=1, col="brown")
+# title(main="d8weight")
+# plot(tuk_d21weight_sex_treat, las=1, col="brown")
+# title(main="d21weight")
+# plot(tuk_d36weight_sex_treat, las=1, col="brown")
+# title(main="d36weight")
+# plot(tuk_d78weight_sex_treat, las=1, col="brown")
+# title(main="d78weight")
+```
+
+### Conclusion :
+
+- *8 jours :* 
+    - effet bisphénol par rapport au contrôle
+    - effet sex:batch : mais ratios M/F non homogènes (plus de F que de M pour batch 2, plus de M que de F pour batch 1)
+    - effet sex:treat (F-Génistéine/F-contrôle)
+- *21 jours :* 
+    - effet bisphénol par rapport au contrôle (effet génistéine par rapport au contrôle ?) 
+    - effet sex:treat (F-Génistéine/F-contrôle)
+- *36 jours :* effet sex:treat (F-Génistéine/F-contrôle), sex:line et faible effet batch:treat mais pas d'effet traitement particulier
+- *78 jours :* effet sex:treat (F-Génistéine/F-contrôle et F-5Aza/F-contrôle), sex:line , batch:sex:treat, mais pas d'effet traitement particulier
+- *âge au premier oeuf :* effet traitement mais pas de traitement particulier (effets Génistéine/Contrôle et Génistéine/Bisphénol => effet Génistéine ?) et faible effet line:batch
+- *nombre d'oeufs :* pas d'effet traitement et effet line:batch
+- *d8-d21, d36-d78 :* effet Bisphénol par rapport au contrôle, F-Génistéine:F-Contrôle
+
+|                    | **line** | **batch** | **sex** | **treat** | **batch:sex** | **sex:treat** | **sex:line** | **batch:treat** | **line:batch** | **line:treat** | **batch:sex:treat** | **line:batch:sex**  |**line:sex:treat**|
+| :----------------: | :------: | :-------: | :-----: | :-------: | :-----------: | :-----------: | :----------: | :-------------: | :------------: | :------------: |:------------------: | :-----------------: |:---------------: |
+| **d8weight**       | \*\*\*   | \*\*\*    |   NS    |     .     | \*            | \*\*          |     NR       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d21weight**      | \*\*\*   | \*\*\*    | \*\*\*  | \*        |      NR       | \*\*          |     NR       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d36weight**      | \*\*\*   | \*        | \*\*\*  |    NS     |      NS       | \*            | \*           |       .         |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d78weight**      | \*\*\*   |    NS     | \*\*\*  |    NS     |      NS       | \*\*          | \*\*\*       |       NS        |       NR       |       NR       | \*                  |          NR         |          NR      |
+| **age1stegg**      | \*\*\*   |    NS     |   NA    | \*        |      NA       |      NA       |     NA       |       NR        |        .       |       NR       |          NA         |          NA         |          NR      |
+| **eggNumber**      | \*       |    NS     |   NA    |     .     |      NA       |      NA       |     NA       |       NR        |       NR       |       NR       |          NA         |          NA         |          NR      |
+| **d8_d21**         | \*\*\*   | \*\*\*    | \*\*\*  | \*        |      NR       | \*\*          |     NR       |       NR        |       \*       |       NR       |          NR         |          NR         |          NR      |
+| **d21_d36**        | \*\*\*   | \*\*\*    | \*\*\*  |    NR     |      NR       |      NR       |     NR       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d36_d78**        | \*\*\*   |    NS     | \*\*\*  |    NS     |      NR       |       .       | \*\*\*       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d8_d78**         | \*\*\*   |    NS     | \*\*\*  |    NS     |      NS       |     \*\*      | \*\*\*       |       NS        |       NR       |       NR       |          \*         |          NR         |          NR      |
+| **d8_d21_norm**    | \*\*\*   |    \*     | \*\*\*  |    NS     |      \*       |      NS       |     NS       |       NR        | \*\*           |       NS       |          NR         |          NR         |        \*\*      |
+| **d21_d36_norm**   | \*\*\*   | \*\*\*    | \*\*\*  |    NR     |      NR       |      NR       |     NR       |       NR        | \*\*\*         |       NR       |          NR         |          NR         |          NR      |
+| **d36_d78_norm**   | \*\*\*   |    NS     | \*\*\*  |    NR     |      NR       |      NR       | \*\*\*       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **d8_d78_norm**    | \*\*\*   | \*\*\*    | \*\*\*  |    NR     |      NR       |      NR       | \*\*\*       |       NR        |       NR       |       NR       |          NR         |          NR         |          NR      |
+| **slope**          | \*\*\*   |    \*     | \*\*\*  | \*\*\*    |      NS       |      NR       | \*\*\*       |       NR        |       NS       |       NR       |          NR         | \*                  |          NR      |
+| **slope_norm**     | \*\*\*   | \*\*\*    | \*\*\*  | \*\*\*    | \*            |      NR       | \*\*         |       .         |       NR       | \*             |          NR         |          NR         |          NR      |
+
+Table: *Signif. codes:  0 '\*\*\*' 0.001 '\*\*' 0.01 '\*' 0.05 '.' 0.1 ' ' 1 ; NA = effet non testé ; NS = effet non significatif ; NR = effet non retenu par step_AIC()*
+
+
+## 4. Heatmap des p-values de TuckeyHSD (intéraction sex:treat) :
+
+```{r}
+heatmap <- function(data, title) {
+  data$test = rownames(data)
+  data$sextreat1 = as.character(lapply(strsplit(as.character(data$test), split="-"), "[", 1))
+  data$sextreat2 = as.character(lapply(strsplit(as.character(data$test), split="-"), "[", 2))
+  data = data[,  c("p.adj", "sextreat1", "sextreat2")]
+  test1 <- data %>% mutate(temp=sextreat1) %>% mutate(sextreat1=sextreat2) %>% mutate(sextreat2=temp) %>% mutate(temp=NULL)
+  data <- data %>% mutate(sextreat1=sextreat1)
+  result <- rbind(data, test1)
+  result <- result[order(result$p.adj),]
+  
+  ggp <- ggplot(result, aes(result$sextreat1, result$sextreat2, fill=result$p.adj)) + 
+  geom_tile() + 
+  scale_fill_viridis_c(oob = squish, limit = c(0,14), space = "Lab", name="-log10(p-value)") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 16)) +
+  theme(axis.text.y = element_text(size = 16)) +
+  ggtitle(title) +  theme(plot.title = element_text(hjust = 0.5, size = 16)) +
+  xlab("sex:treat") + ylab("sex:treat") 
+  return(ggp)
+}
+```
+
+```{r,fig.width=21, fig.height=15}
+
+create_table_with_sign <- function(data, type) {
+  if(type=="treat"){data_sign = data.frame(data$treat)}
+  if(type=="sex:treat"){data_sign = data.frame(data$`sex:treat`)}
+  if(type=="treat:sex"){data_sign = data.frame(data$`treat:sex`)}
+  if(type=="line:treat"){data_sign = data.frame(data$`line:treat`)}
+  if(type=="line:treat:sex"){data_sign = data.frame(data$`line:treat:sex`)}
+  data_sign$sign <- ifelse(data_sign$p.adj < 0.001, "***",
+                                  ifelse(data_sign$p.adj < 0.01, "**",
+                                         ifelse(data_sign$p.adj < 0.05, "*",
+                                                ifelse(data_sign$p.adj < 0.1, ".",""))))
+  return(data_sign) }
+
+df_tuk_d8weight_sex_treat = create_table_with_sign(data=tuk_d8weight_sex_treat, "sex:treat")
+df_tuk_d21weight_sex_treat = create_table_with_sign(data=tuk_d21weight_sex_treat, "sex:treat")
+df_tuk_d36weight_sex_treat = create_table_with_sign(data=tuk_d36weight_sex_treat, "sex:treat")
+df_tuk_d78weight_sex_treat = create_table_with_sign(data=tuk_d78weight_sex_treat, "sex:treat")
+
+# -log10(p_values):
+df_tuk_d8weight_sex_treat$p.adj <- -log10(df_tuk_d8weight_sex_treat$p.adj + 1e-12)
+df_tuk_d21weight_sex_treat$p.adj <- -log10(df_tuk_d21weight_sex_treat$p.adj + 1e-12)
+df_tuk_d36weight_sex_treat$p.adj <- -log10(df_tuk_d36weight_sex_treat$p.adj + 1e-12)
+df_tuk_d78weight_sex_treat$p.adj <- -log10(df_tuk_d78weight_sex_treat$p.adj + 1e-12)
+
+hm_d8 = heatmap(data = df_tuk_d8weight_sex_treat, "Plot of TuckeyHSD p-values d8")
+hm_d21 = heatmap(data = df_tuk_d21weight_sex_treat, "Plot of TuckeyHSD p-values d21")
+hm_d36 = heatmap(data = df_tuk_d36weight_sex_treat, "Plot of TuckeyHSD p-values d36")
+hm_d78 = heatmap(data = df_tuk_d78weight_sex_treat, "Plot of TuckeyHSD p-values d78")
+
+# suppressWarnings(suppressMessages(grid.arrange(hm_d8, hm_d21, hm_d36, hm_d78, hm_d8_d21, hm_d36_d78, hm_d8_d78, ncol = 3, nrow = 3)))
+```
+
+```{r,fig.width=14.75, fig.height=4.5}
+heatmap2 <- function(data, row_legend, top_title) {
+  data$test = rownames(data)
+  data$sextreat1 = as.character(lapply(strsplit(as.character(data$test), split="-"), "[", 1))
+  data$sextreat2 = as.character(lapply(strsplit(as.character(data$test), split="-"), "[", 2))
+  data = data[,  c("p.adj", "sextreat1", "sextreat2")]
+  test1 <- data %>% mutate(temp=sextreat1) %>% mutate(sextreat1=sextreat2) %>% mutate(sextreat2=temp) %>% mutate(temp=NULL)
+  data <- data %>% mutate(sextreat1=sextreat1)
+  result <- rbind(data, test1)
+  result <- result[order(result$p.adj),]
+  mat_tmp = spread(result, sextreat1, p.adj)
+  mat = as.matrix(mat_tmp)
+  mat2 = mat[, -1]
+  rownames(mat2) = mat[, 1]
+  class(mat2) <- "numeric"
+  ha_top = HeatmapAnnotation(empty = anno_empty(border = FALSE, height = unit(1, "mm")),
+                             foo = anno_block(gp = gpar(fill = c("coral", "cyan3")), labels = c("F", "M")))
+  ha_left = rowAnnotation(foo = anno_block(gp = gpar(fill = c("coral", "cyan3")), labels = c("F", "M")))
+  
+  split_top = rep(1:2, each = 5)
+  split_left = rep(1:2, each = 5)
+  col_fun = colorRamp2(0:12, viridis(13))
+  # col_fun = colorRamp2(0:10, viridis(11))
+  col_fun(seq(-3, 3))
+  
+  if (row_legend==T) {
+     Heatmap(mat2, name = "-log10(p-value)", column_title = top_title, na_col = "white",
+          column_title_gp = gpar(fill = "azure4", col = "white", border = "black", fontface = "bold"),
+          cluster_columns = FALSE, cluster_rows = FALSE, col = col_fun,  
+          cluster_row_slices = FALSE, cluster_column_slices = FALSE,
+          column_split = split_top, row_split = split_left,
+          top_annotation = ha_top, left_annotation = ha_left, 
+          row_title = NULL, column_names_rot = 45, border = TRUE)
+  }else{
+    Heatmap(mat2, name = "-log10(p-value)",  
+          cluster_columns = FALSE, cluster_rows = FALSE, col = col_fun, na_col = "white",
+          column_title = top_title, 
+          column_title_gp = gpar(fill = "azure4", col = "white", border = "black", fontface = "bold"),
+          cluster_row_slices = FALSE, cluster_column_slices = FALSE,
+          column_split = split_top, row_split = split_left,
+          top_annotation = ha_top, row_title = NULL, column_names_rot = 45, border = TRUE)
+  }
+}
+
+ch_d8 = heatmap2(data = df_tuk_d8weight_sex_treat, T, "Weight at 8 days")
+ch_d21 = heatmap2(data = df_tuk_d21weight_sex_treat, F, "Weight at 21 days")
+ch_d36 = heatmap2(data = df_tuk_d36weight_sex_treat, F, "Weight at 36 days")
+ch_d78 = heatmap2(data = df_tuk_d78weight_sex_treat, F, "Weight at 78 days")
+
+ht_list = ch_d8 + ch_d21 + ch_d36 + ch_d78
+
+pdf(file = "figures/figure_2.pdf", width=14.75, height=4.5)
+draw(ht_list, merge_legend = TRUE, legend_title_gp = gpar(fontsize = 14))
+dev.off()
+```
