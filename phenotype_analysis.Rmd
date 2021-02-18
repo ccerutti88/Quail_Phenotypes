@@ -19,7 +19,8 @@ output:
 libraries = c("ggplot2", "plyr", "dplyr", "ggpmisc", "wrapr", "magrittr", "rlang",
               "scales", "vctrs", "gridExtra", "cowplot", "MASS", "gginnards", "tidyr",
               "broom", "chemCal", "viridis", "data.table", "cdata", "circlize", "GetoptLong",
-              "limma", "stringr", "devtools", "rtracklayer", "edgeR", "ComplexHeatmap")
+              "limma", "stringr", "devtools", "rtracklayer", "edgeR", "ComplexHeatmap", 
+              "FactoMineR", "factoextra")
 
 suppressWarnings(suppressMessages(invisible(lapply(libraries, library, character.only = TRUE))))
 ```
@@ -340,18 +341,66 @@ suppressWarnings(suppressMessages(attach(df_diff)))
 suppressWarnings(suppressMessages(attach(df)))
 ```
 
-## Identification of outliers:
+## Outliers identification:
 
-```{r}
-# Outliers 3 standard deviations from the mean:
+### Weight loss:
 
+```{r,fig.width=20, fig.height=14}
 # Mean weight at 78 days and standard deviation (sd) group by line and sex : 
-# df_mean_sd = df %>% group_by(line, sex, treat, batch) %>% summarise(mean = mean(na.omit(d78weight)), sd = sd(na.omit(d78weight)))
-# df_mean_sd
+df_mean_sd = (df %>% group_by(line, sex, treat, batch) %>% summarise(mean_d8 = mean(na.omit(d8weight)), sd_d8 = sd(na.omit(d8weight)), 
+                                                                     mean_d21 = mean(na.omit(d21weight)), sd_d21 = sd(na.omit(d21weight)),
+                                                                     mean_d36 = mean(na.omit(d36weight)), sd_d36 = sd(na.omit(d36weight)),
+                                                                     mean_d78 = mean(na.omit(d78weight)), sd_d78 = sd(na.omit(d78weight))))
+head(df_mean_sd)
 
-# df["d8weight"][df["ID"] == 7090] %in% df_mean_sd[(df_mean_sd["line"]=="A" & df_mean_sd["sex"]=="M" & df_mean_sd["treat"]=="Genistein")]
+# Weight loss:
+d_36_78 = df[(df$d78weight < df$d36weight), c(1,4:13)]
+d_36_78 =  d_36_78[!is.na(d_36_78$ID),] # 10
+d_21_36 = df[(df$d36weight < df$d21weight), c(1,4:13)]
+d_21_36 =  d_21_36[!is.na(d_21_36$ID),] # 5
+
+weight_loss = df[(df$d78weight < df$d36weight) | (df$d36weight < df$d21weight), c(1,4:13)]
+weight_loss$loss_w_36_78 = weight_loss$d36weight - weight_loss$d78weight
+weight_loss$loss_w_21_36 = weight_loss$d21weight - weight_loss$d36weight
+weight_loss <- weight_loss[!is.na(weight_loss$ID), c(1,2,3,4,12,13,5,6,7,8,9,10,11)]
+weight_loss = weight_loss[order(weight_loss["sex"], weight_loss["loss_w_36_78"], decreasing = TRUE),]
+weight_loss
+summary(weight_loss)
 ```
 
+### ACP:
+
+```{r,fig.width=20, fig.height=14}
+# ACP:
+## Weights, egg number, age first egg:
+pca <- function(dataframe, title, sex, line, treat, batch){
+  dataframe = (dataframe[dataframe["sex"]==sex & dataframe["line"]==line & 
+                         dataframe["treat"]==treat & dataframe["batch"]==batch, ])
+  dataframe <- dataframe[!is.na(dataframe$ID), ]
+  rownames(dataframe) <- dataframe[,1]
+  if(sex=="F"){
+    df.pca <- PCA(dataframe[, 7:12], graph = FALSE)
+  }else{
+    df.pca <- PCA(dataframe[, 7:10], graph = FALSE)
+  }
+  fviz_pca_ind(df.pca, labelsize = 6, 
+               # geom.ind = "point", # Montre les points seulement (mais pas le "text")
+               col.ind = dataframe$treat, # colorer by groups
+               # palette = c("#00AFBB","#00AFBB", "blue", "red", "violet"),
+               palette = "blue",
+               addEllipses = TRUE, # Ellipses de concentration
+               repel = TRUE, # Évite le chevauchement de texte
+               legend.title = "Groups") + labs(title=title) + theme_bw(base_size = 20) 
+}
+
+pca_F_A_5Aza_1 = pca(dataframe = df, "F_A_5Aza_1", "F", "A", "5Aza", 1)
+pca_F_B_5Aza_2 = pca(dataframe = df, "F_B_5Aza_2", "F", "B", "5Aza", 2)
+
+pca_M_A_5Aza_1 = pca(dataframe = df, "M_A_5Aza_1", "M", "A", "5Aza", 1)
+pca_M_B_5Aza_2 = pca(dataframe = df, "M_B_5Aza_2", "M", "B", "5Aza", 2)
+
+suppressWarnings(suppressMessages(grid.arrange(pca_F_A_5Aza_1, pca_F_B_5Aza_2, pca_M_A_5Aza_1, pca_M_B_5Aza_2, ncol = 2, nrow = 2)))
+```
 ```{r,fig.width=16, fig.height=4}
 # Identification of outliers for 5Aza (according to the boxplot visualization):
 merged_table = merge(df_long_norm, df_r_norm, by.x="ID", by.y="ID")
@@ -384,11 +433,8 @@ ggp_6736 = ggp(dataframe = df_6736, df_6736$line, df_6736$ID) # ID 6736 => bad s
 ggp_1982 = ggp(dataframe = df_1982, df_1982$line, df_1982$ID) # ID 1982 => good slop, to conserve
 
 suppressWarnings(suppressMessages(grid.arrange(ggp_6736, ggp_1982, ncol = 2, nrow = 1)))
-
-# Outliers deletion from data:
-df_diff = df_diff[!df_diff$ID==min,] 
-df["d78weight"][df$ID==min,] <- NA
 ```
+
 ```{r, fig.width=15, fig.height=7}
 df_r_norm_filter <- merged_table %>% filter(rsquarred_norm < 0.75)
 df_r_norm_filter = df_r_norm_filter[order(df_r_norm_filter$rsquarred_norm),]
@@ -401,6 +447,14 @@ ggp_r_0_5 = ggp(dataframe = df_r_0_5, df_r_0_5$line, df_r_0_5$ID)
 ggp_r_0_7 = ggp(dataframe = df_r_0_7, df_r_0_7$line, df_r_0_7$ID)
 
 suppressWarnings(suppressMessages(grid.arrange(ggp_r_0_4, ggp_r_0_5, ggp_r_0_7, ncol = 2, nrow = 2)))
+```
+
+```{r,fig.width=16, fig.height=4}
+# Outliers deletion from data:
+# df_diff = df_diff[!df_diff$ID==min,] 
+# df["d78weight"][df$ID==min,] <- NA
+df_diff = merge(df_diff, df_r_norm, by.x="ID", by.y="ID")
+df_diff = df_diff[df_diff["rsquarred_norm"] > 0.7, ] # delete id if r_squarred_norm < 0.7
 ```
 
 # II. Distribution des données :
@@ -549,6 +603,10 @@ perfect = plot_grid(first_col, second_col, ncol=1, nrow=2, rel_widths = c(15,15)
 
 pdf(file = "figures/supp_data_1.pdf", width=15, height=14)
 suppressWarnings(suppressMessages(perfect))}))
+dev.off()
+
+tiff("figures/supp_data_1.tiff", width = 15, height = 14, units = "in", res = 500, pointsize = 12)
+suppressWarnings(suppressMessages(perfect))
 dev.off()
 ```
 ### c. Histogrammes en fonction du lot: 
@@ -843,11 +901,19 @@ pdf(file = "figures/figure_1.pdf", height=6, width=17)
 fig_1
 dev.off()
 
+tiff("figures/figure_1.tiff", width=17, height=6, units = "in", res = 500, pointsize = 12)
+fig_1
+dev.off()
+
 first_col_supp2 = plot_grid(box_slope_norm_sex, ncol=1, nrow=1, labels = "a", label_size = 20)
 second_col_supp2= plot_grid(box_slope_norm_batch, ncol=1, nrow=1, labels = "b", label_size = 20)
 supp_2 = plot_grid(first_col_supp2, second_col_supp2, ncol=2, nrow=1, rel_widths = c(4,4.5), rel_heights = c(7,7))
 
 pdf(file = "figures/supp_data_2.pdf", height=6, width=15)
+supp_2 
+dev.off()
+
+tiff("figures/supp_data_2.tiff", width=15, height=6, units = "in", res = 500, pointsize = 12)
 supp_2 
 dev.off()
 ```
@@ -1087,7 +1153,7 @@ tukey_legend <- function(data) {
     geom_errorbar(aes(pair, ymin=lwr, ymax=upr), width=0.2) +
     geom_point(aes(pair, diff)) +
     labs(colour="") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme_bw(base_size = 16) +
     scale_x_discrete(name ="Treatment pair") + scale_y_continuous(name = "Mean difference")
     return(ggp)}
 
@@ -1138,6 +1204,10 @@ legend = get_legend(tukey_legend(data=tuk_slope_norm))
 
 pdf(file = "figures/supp_data_3.pdf", width=13, height=5)
 plot_grid(tuk_d21_ggp, tuk_age1stegg_ggp, tuk_slope_norm_ggp, legend, nrow=1, ncol=4, labels=c('a', 'b', 'c', ""), rel_widths = c(2,2,2,1), rel_heights = c(2,2,2,1))
+dev.off()
+
+tiff("figures/supp_data_3.tiff", width = 13, height = 5, units = "in", res = 500, pointsize = 12)
+plot_grid(tuk_d21_ggp, tuk_age1stegg_ggp, tuk_slope_norm_ggp, legend, nrow=1, ncol=4, labels=c('a', 'b', 'c', ""), rel_widths = c(2,2,2,1), rel_heights = c(2,2,2,1)) 
 dev.off()
 ```
 
@@ -1397,6 +1467,10 @@ ch_d78 = heatmap2(data = df_tuk_d78weight_sex_treat, F, "Weight at 78 days")
 ht_list = ch_d8 + ch_d21 + ch_d36 + ch_d78
 
 pdf(file = "figures/figure_2.pdf", width=14.75, height=4.5)
+draw(ht_list, merge_legend = TRUE, legend_title_gp = gpar(fontsize = 14))
+dev.off()
+
+tiff("figures/figure_2.tiff", width=14.75, height=4.5, units = "in", res = 500, pointsize = 12)
 draw(ht_list, merge_legend = TRUE, legend_title_gp = gpar(fontsize = 14))
 dev.off()
 ```
