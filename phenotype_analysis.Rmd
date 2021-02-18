@@ -454,6 +454,7 @@ suppressWarnings(suppressMessages(grid.arrange(ggp_r_0_4, ggp_r_0_5, ggp_r_0_7, 
 # df_diff = df_diff[!df_diff$ID==min,] 
 # df["d78weight"][df$ID==min,] <- NA
 df_diff = merge(df_diff, df_r_norm, by.x="ID", by.y="ID")
+df_diff[df_diff["rsquarred_norm"] < 0.7, ] # id to delete
 df_diff = df_diff[df_diff["rsquarred_norm"] > 0.7, ] # delete id if r_squarred_norm < 0.7
 ```
 
