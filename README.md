@@ -22,6 +22,7 @@ Study the effects of *in-ovo* injection of treatments on quail growth and reprod
 - **Data manipulation:** *dplyr*, *tidyr*
 
 Command examples to install a library:
+
 **On markdown *R* script:**
 ```{r}
 install.packages("tidyr", type = "source")
