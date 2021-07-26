@@ -221,12 +221,12 @@ h_d78_line = hist_weight(dataframe = df, x.var = "d78weight", line, "Weight at 7
 h_age1stegg_line = hist_egg(dataframe = df, x.var = "age1stegg", line, "Age at first egg laid")
 h_eggNumber_line = hist_egg(dataframe = df, x.var = "eggNumber", line, "Egg number laid")
 
-# pdf(file = "figures/supp_data_1_b.pdf", width=15, height=7)
+pdf(file = "figures/supp_data_1_b.pdf", width=15, height=7)
 grid.arrange(h_d8_line, h_d21_line, h_d36_line, h_d78_line,
              h_age1stegg_line, h_eggNumber_line, legend_b,
              ncol = 4, nrow = 2)
 }))
-# dev.off()
+dev.off()
 ```
 
 ```{r,fig.width=15, fig.height=14}
@@ -244,12 +244,17 @@ suppressWarnings(suppressMessages(perfect))}))
 
 ```{r}
 # Mean age1stegg and standard deviation (sd) for each line : 
-df_mean_sd_age1stegg = df %>% group_by(line) %>% summarise(mean = round(mean(na.omit(age1stegg)), digits = 1), sd = round(sd(na.omit(age1stegg)), digits = 2))
+df_mean_sd_age1stegg = df %>% group_by(line) %>% summarise(mean = round(mean(na.omit(age1stegg)), digits = 2), sd = round(sd(na.omit(age1stegg)), digits = 2))
 df_mean_sd_age1stegg
 
 # Mean eggNumber and standard deviation (sd) for each line : 
-df_mean_sd_eggnumber = df %>% group_by(line) %>% summarise(mean = round(mean(na.omit(eggNumber)), digits = 1), sd = round(sd(na.omit(eggNumber)), digits = 2))
+df_mean_sd_eggnumber = df %>% group_by(line) %>% summarise(mean = round(mean(na.omit(eggNumber)), digits = 2), sd = round(sd(na.omit(eggNumber)), digits = 2))
 df_mean_sd_eggnumber
+
+# Mean weight at 78 days and standard deviation (sd) for each line : 
+df_mean_d78weight = df %>% group_by(line) %>% summarise(mean_weight = round(mean(na.omit(d78weight)), digits = 2), 
+                                                        sd_weight = round(sd(na.omit(d78weight)), digits = 2))
+df_mean_d78weight
 ```
 
 # III. Statistical analysis:
