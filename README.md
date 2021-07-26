@@ -16,7 +16,7 @@ Study the effects of *in-ovo* injection of treatments on quail growth and reprod
 ### Required libraries:
 
 - **Figures:** *ggplot2*, *gridExtra*, *gridGraphics*, *cowplot*, *ggpubr*, *viridis*, *circlize*, *ComplexHeatmap*
-- **linear mixed model:** *nlme*, *MASS*
+- **Linear mixed model:** *nlme*, *MASS*
 - **Anova:** *car* 
 - **Tukey HSD test:** *emmeans* 
 - **Data manipulation:** *dplyr*, *tidyr*
